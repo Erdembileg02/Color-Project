@@ -5,7 +5,7 @@ import numpy as np
 cap = cv2.VideoCapture(0)
 
 if not cap.isOpened():
-    print("Camera neegdsenгүй!")
+    print("Camera neegdsengvi!")
     exit()
 
 print("Camera opened")
