@@ -1,79 +1,189 @@
-
 import cv2
 import numpy as np
+from sklearn.cluster import KMeans
 
-cap = cv2.VideoCapture(0)
+# HSV color ranges: (lower HSV, upper HSV)
+COLOR_RANGES = {
+    "RED": [
+        ((0, 110, 75), (10, 255, 255)),
+        ((170, 110, 75), (179, 255, 255)),
+    ],
+    "ORANGE": [((11, 110, 75), (21, 255, 255))],
+    "YELLOW": [((22, 100, 85), (35, 255, 255))],
+    "GREEN": [((36, 65, 60), (85, 255, 255))],
+    "BLUE": [((95, 85, 60), (130, 255, 255))],
+    "PURPLE": [((131, 75, 60), (169, 255, 255))],
+}
 
-if not cap.isOpened():
-    print("Camera neegdsengvi!")
-    exit()
+# Bounding box colors in BGR
+BOX_COLORS = {
+    "RED": (0, 0, 255),
+    "ORANGE": (0, 165, 255),
+    "YELLOW": (0, 255, 255),
+    "GREEN": (0, 255, 0),
+    "BLUE": (255, 0, 0),
+    "PURPLE": (255, 0, 255),
+}
 
-print("Camera opened")
+MIN_AREA = 1000
 
-while True:
-    ret, frame = cap.read()
 
-    if not ret:
-        break
+def find_colors(frame):
+    output = frame.copy()
+    blurred = cv2.GaussianBlur(frame, (5, 5), 0)
+    hsv = cv2.cvtColor(blurred, cv2.COLOR_BGR2HSV)
+    detected = []
+    kernel = np.ones((5, 5), dtype=np.uint8)
 
-    # Камерын баруун, зүүн талыг солих
-    frame = cv2.flip(frame, 1)
+    for name, ranges in COLOR_RANGES.items():
+        mask = np.zeros(hsv.shape[:2], dtype=np.uint8)
 
-    # BGR-ээс HSV рүү хувиргах
-    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        for lower, upper in ranges:
+            lower_array = np.array(lower, dtype=np.uint8)
+            upper_array = np.array(upper, dtype=np.uint8)
+            current_mask = cv2.inRange(hsv, lower_array, upper_array)
+            mask = cv2.bitwise_or(mask, current_mask)
 
-    # Улаан өнгийн хоёр хязгаар
-    lower_red = np.array([0, 120, 70])
-    upper_red = np.array([10, 255, 255])
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
 
-    lower_red2 = np.array([170, 120, 70])
-    upper_red2 = np.array([179, 255, 255])
+        contours, _ = cv2.findContours(
+            mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+        )
 
-    # Улаан өнгийг ялгах
-    mask = cv2.inRange(hsv, lower_red, upper_red)
-    mask2 = cv2.inRange(hsv, lower_red2, upper_red2)
-    red_mask = cv2.bitwise_or(mask, mask2)
+        for contour in contours:
+            area = cv2.contourArea(contour)
+            if area < MIN_AREA:
+                continue
 
-    # Улаан өнгийн объектуудын хүрээг олох
-    contours, hierarchy = cv2.findContours(
-        red_mask,
-        cv2.RETR_EXTERNAL,
-        cv2.CHAIN_APPROX_SIMPLE
-    )
-
-    for contour in contours:
-        area = cv2.contourArea(contour)
-
-        # Хэт жижиг хэсгүүдийг алгасах
-        if area > 500:
             x, y, w, h = cv2.boundingRect(contour)
-
-            # Ногоон дөрвөлжин хүрээ
-            cv2.rectangle(
-                frame,
-                (x, y),
-                (x + w, y + h),
-                (0, 255, 0),
-                2
-            )
-
+            detected.append(name)
+            color = BOX_COLORS[name]
+            cv2.rectangle(output, (x, y), (x + w, y + h), color, 2)
             cv2.putText(
-                frame,
-                "RED",
+                output,                
+                name,
                 (x, max(y - 10, 20)),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.7,
-                (0, 255, 0),
-                2
+                color,
+                2,
             )
 
-    cv2.imshow("Camera", frame)
-    cv2.imshow("Red Mask", red_mask)
+    return output, detected
 
-    # Q товч дарахад хаах
-    key = cv2.waitKey(1)
-    if key & 0xFF == ord("q"):
-        break
 
-cap.release()
-cv2.destroyAllWindows()
+def color_name_from_bgr(bgr):
+    pixel = np.uint8([[bgr]])
+    hsv = cv2.cvtColor(pixel, cv2.COLOR_BGR2HSV)[0, 0]
+    h, s, v = map(int, hsv)
+
+    if v < 55:
+        return "BLACK"
+    if s < 35 and v > 190:
+        return "WHITE"
+    if s < 45:
+        return "GRAY"
+
+    for name, ranges in COLOR_RANGES.items():
+        for lower, upper in ranges:
+            if all(lower[i] <= int(hsv[i]) <= upper[i] for i in range(3)):
+                return name
+
+    return "OTHER"
+
+
+def dominant_color_kmeans(frame, roi):
+    x1, y1, x2, y2 = roi
+    crop = frame[y1:y2, x1:x2]
+    if crop.size == 0:
+        return None, "UNKNOWN"
+
+    small = cv2.resize(crop, (64, 64))
+    pixels = small.reshape(-1, 3).astype(np.float32)
+
+    model = KMeans(n_clusters=3, random_state=42, n_init=3)
+    labels = model.fit_predict(pixels)
+    counts = np.bincount(labels, minlength=3)
+    dominant_index = int(np.argmax(counts))
+    dominant_bgr = model.cluster_centers_[dominant_index]
+    dominant_bgr = np.clip(np.rint(dominant_bgr), 0, 255).astype(np.uint8)
+    name = color_name_from_bgr(dominant_bgr)
+    return dominant_bgr, name
+
+
+def main():
+    cap = cv2.VideoCapture(0)
+    if not cap.isOpened():
+        print("Camera neegdsen gui!")
+        return
+
+    print("Camera ajillaj baina")
+    print("Q - Garah")
+    frame_number = 0
+    dominant_bgr = None
+    dominant_name = "UNKNOWN"
+
+    try:
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                print("Cameraas zurag avch chadsangui")
+                break
+
+            frame = cv2.flip(frame, 1)
+            result, detected = find_colors(frame)
+            height, width = frame.shape[:2]
+            side = min(height, width) // 3
+            center_x = width // 2
+            center_y = height // 2
+            x1 = center_x - side // 2
+            y1 = center_y - side // 2
+            x2 = x1 + side
+            y2 = y1 + side
+            roi = (x1, y1, x2, y2)
+
+            if frame_number % 12 == 0:
+                dominant_bgr, dominant_name = dominant_color_kmeans(frame, roi)
+            frame_number += 1
+
+            cv2.rectangle(result, (x1, y1), (x2, y2), (255, 255, 255), 2)
+
+            if dominant_bgr is not None:
+                cv2.rectangle(
+                    result,
+                    (10, height - 60),
+                    (65, height - 15),
+                    tuple(int(c) for c in dominant_bgr),
+                    -1,
+                )
+                cv2.putText(
+                    result,
+                    "Dominant: " + dominant_name,
+                    (75, height - 30),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.6,
+                    (255, 255, 255),
+                    2,
+                )
+
+            cv2.putText(
+                result,
+                "Objects: " + str(len(detected)),
+                (10, 30),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                (255, 255, 255),
+                2,
+            )
+            cv2.imshow("Color Recognition System", result)
+            key = cv2.waitKey(1) & 0xFF
+            if key in (ord("q"), ord("Q")):
+                break
+    finally:
+        cap.release()
+        cv2.destroyAllWindows()
+
+
+if __name__ == "__main__":
+    main()
